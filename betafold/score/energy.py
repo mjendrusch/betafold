@@ -1,9 +1,12 @@
 import numpy as np
+import torch
 
 from pyrosetta import *
 from rosetta.core.scoring.methods import \
   ContextIndependentOneBodyEnergy, LongRangeTwoBodyEnergy
 from rosetta.core.scoring import ScoreType
+
+from betafold.distributions.von_mises import TorsionDistribution
 
 @rosetta.EnergyMethod
 class DistanceTerm(LongRangeTwoBodyEnergy):
@@ -65,8 +68,54 @@ class TorsionTerm(ContextIndependentOneBodyEnergy):
     emap.get().set(self.scoreType, score)
 
 @rosetta.EnergyMethod
+class SmoothTorsionTerm(TorsionTerm):
+  def __init__(self, torsion, reference_torsion, bins=36,
+               concentration=1 / ((np.pi / 18) ** 2)):
+    TorsionTerm.__init__(self, torsion, reference_torsion, bins=bins)
+    space = np.linspace(-180, 180, bins)
+    self.mu = np.repeat(space, bins)
+    self.nu = np.repeat(space.reshape(bins, 1), bins, axis=1).reshape(-1)
+    self.weights = torch.softmax(
+      self.torsion.reshape(self.torsion.size(0), -1),
+      dim=1
+    )
+    self.k = concentration
+
+  def residue_energy(self, res, pose, emap):
+    pos = res.seqpos()
+    phi = pose.phi(pos)
+    psi = pose.psi(pos)
+    distribution = TorsionDistribution(
+      self.mu, self.nu, self.weights[pos],
+      k1=self.k, k2=self.k
+    )
+    return distribution.log_density(phi, psi)
+
+@rosetta.EnergyMethod
+class SmoothArgmaxTorsionTerm(TorsionTerm):
+  def __init__(self, torsion, reference_torsion, bins=36,
+               concentration=1 / ((np.pi / 18) ** 2)):
+    TorsionTerm.__init__(self, torsion, reference_torsion, bins=bins)
+    self.k = concentration
+    torsion_max = self.torsion.reshape(
+      self.torsion.size(0), -1
+    ).argmax(dim=1)
+    self.mu = torsion_max % bins
+    self.nu = torsion_max // bins
+
+  def residue_energy(self, res, pose, emap):
+    pos = res.seqpos()
+    phi = pose.phi(pos)
+    psi = pose.psi(pos)
+    distribution = TorsionDistribution(
+      self.mu[pos], self.nu[pos],
+      k1=self.k, k2=self.k
+    )
+    return distribution.log_density(phi, psi)
+
+@rosetta.EnergyMethod
 class InterpolatedTorsionTerm(TorsionTerm):
-  def __init__(self, torsion, reference_torsion, bins=36):
+  def __init__(self, torsion, reference_torsion, bins=36, ):
     TorsionTerm.__init__(self, torsion, reference_torsion, bins=bins)
 
   def _debin_angle(self, bin_id):
