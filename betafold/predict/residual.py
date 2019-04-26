@@ -16,7 +16,7 @@ class DilatedResidualBlockNd(nn.Module):
     self.blocks = nn.ModuleList([
       conv(size, hidden_size, 1),
       conv(hidden_size, hidden_size, 3,
-            dilation=dilation, padding=dilation),
+           dilation=dilation, padding=dilation),
       conv(hidden_size, size, 1)
     ])
     self.activation = activation
@@ -41,7 +41,7 @@ class DilatedResidualBlock2d(DilatedResidualBlockNd):
 
 class ResidualStackNd(nn.Module):
   def __init__(self, size=128, hidden_size=64, N=1,
-                depth=55, dilations=[1, 2, 4, 8]):
+               depth=55, dilations=[1, 2, 4, 8]):
     super(ResidualStackNd, self).__init__()
     res_block = eval(f"DilatedResidualBlock{N}d")
     self.blocks = nn.ModuleList([
