@@ -6,15 +6,19 @@ from pyrosetta import *
 
 from protsupport.data.embedding import one_hot_aa
 
-class GenerativeFragmentMover():
+class GenerativeFragmentMover(rosetta.protocols.moves.Mover):
   def __init__(self, fragment_iterations=100, 
                fragment_size=9, num_fragments=100,
                input_size=32):
+    rosetta.protocols.moves.Mover.__init__(self)
     self.fragment_iterations = fragment_iterations
     self.fragment_size = fragment_size
     self.input_size = input_size
     self.num_fragments = num_fragments
     self.cache_sequence = None
+
+  def get_name(self):
+    return self.__class__.__name__
 
   def compute_features(self, sequence):
     raise NotImplementedError("Abstract.")
@@ -56,6 +60,7 @@ class GenerativeFragmentMover():
       pose.set_psi(idx + position, psi[idx])
 
   def apply(self, pose):
+    pose = pose.get()
     sequence = pose.sequence()
     if sequence != self.cache_sequence:
       self.cache_sequence = sequence
