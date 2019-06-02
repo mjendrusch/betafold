@@ -1,26 +1,27 @@
 import numpy as np
+import torch
 
 def norm_von_mises(k1, k2, k3):
   return 1
 
 def density_von_mises(phi, psi, mu=0, nu=0, k1=10, k2=10, k3=0):
-  return norm_von_mises(k1, k2, k3) * np.exp(
-    k1 * np.cos(phi - mu)
-    + k2 * np.cos(psi - nu)
-    - k3 * np.cos((phi - mu) - (psi - nu))
+  return norm_von_mises(k1, k2, k3) * torch.exp(
+    k1 * torch.cos(phi - mu)
+    + k2 * torch.cos(psi - nu)
+    - k3 * torch.cos((phi - mu) - (psi - nu))
   )
 
 def log_von_mises(phi, psi, mu=0, nu=0, k1=10, k2=10, k3=0):
-  return k1 * np.cos(phi - mu) \
-       + k2 * np.cos(psi - nu) \
-       - k3 * np.cos((phi - mu) - (psi - nu))
+  return k1 * torch.cos(phi - mu) \
+       + k2 * torch.cos(psi - nu) \
+       - k3 * torch.cos((phi - mu) - (psi - nu))
 
 def density_mixture_von_mises(phi, psi, w=1, mu=0, nu=0, k1=10, k2=10):
   result = w * density_von_mises(phi, psi, mu, nu, k1, k2)
   return result.sum()
 
 def log_mixture_von_mises(phi, psi, w=1, mu=0, nu=0, k1=10, k2=10):
-  return np.log(density_mixture_von_mises(phi, psi, w, mu, nu, k1, k2))
+  return torch.log(density_mixture_von_mises(phi, psi, w, mu, nu, k1, k2))
 
 class TorsionDistribution():
   def __init__(self, mu, nu, w=1, k1=10, k2=10, k3=0):

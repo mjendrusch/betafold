@@ -1,5 +1,6 @@
 import numpy as np
 import torch
+from torch.autograd import grad
 
 from pyrosetta import *
 from rosetta.core.scoring.methods import \
@@ -37,8 +38,78 @@ class DistanceTerm(LongRangeTwoBodyEnergy):
     emap.get().set(self.scoreType, score)
 
 @rosetta.EnergyMethod
+class InterpolatedDistanceTerm(DistanceTerm):
+  def __init__(self, distogram, reference_distogram, min_distance=2, max_distance=22, bins=64):
+    DistanceTerm.__init__(self, distogram, reference_distogram,
+                          min_distance=min_distance,
+                          max_distance=max_distance,
+                          bins=bins)
+  
+  def _debin_distance(self, bin_id):
+    distance = bin_id / self.bins * self.max_distance
+    return distance
+
+  def _interpolate(self, x, y, distance):
+    if not isinstance(distance, torch.Tensor):
+      distance = torch.tensor(distance)
+
+    distance_bin = self._bin_distance(distance)
+    distance_next = (distance_bin + 1) % self.bins
+    distance_offset = self._debin_distance(distance_bin)
+    distance_p = (distance - distance_offset) / self.max_distance * self.bins % 1
+    if self.has_ref:
+      numerators = torch.Tensor([
+        self.reference[distance_bin, x, y],
+        self.reference[distance_next, x, y]
+      ])
+    else:
+      numerators = torch.zeros(2)
+    denominators = torch.Tensor([
+      self.distogram[distance_bin, x, y],
+      self.distogram[distance_next, x, y]
+    ])
+    score_points = numerators - denominators
+    score = score_points[0] * (1 - distance_p) + score_points[1] * distance_p
+    return score
+
+  def residue_pair_energy(self, res1, res2, pose, sf, emap):
+    cb1 = res1.atom(res1.atom_index("CB")).xyz
+    cb2 = res2.atom(res2.atom_index("CB")).xyz
+    pos1 = res1.seqpos() - 1
+    pos2 = res2.seqpos() - 1
+    distance = (cb2 - cb1).norm()
+    score = self._interpolate(pos1, pos2, distance)
+    emap.get().set(self.scoreType, score)
+
+  def _internal_distance_derivative(self, x, y):
+    f2 = x - y
+    distance = f2.length()
+    if distance != 0.0:
+      invd = 1 / distance
+      f1 = x.cross(y)
+      f1 *= invd
+      f2 *= invd
+    else:
+      f1 = 0.0
+    return f1, f2, distance
+
+  def eval_residue_atom_derivative(self, atom_id, pose, dm, scorefxn, weights, f1, f2):
+    pos1 = atom_id.rsd()
+    x = pose.conformation().xyz(atom_id)
+    for pos2 in range(pose.total_residue()):
+      y = pose.conformation().xyz(rosetta.core.id.AtomID(atom_id.atomno(), pos2))
+      r1, r2, distance = self._internal_distance_derivative(x, y)
+      distance = torch.tensor(distance, requires_grad=True)
+      score = self._interpolate(pos1, pos2, distance)
+      gradient = grad([score], [distance])[0]
+      r1 *= float(gradient)
+      r2 *= float(gradient)
+      f1 += r1
+      f2 += r2
+
+@rosetta.EnergyMethod
 class TorsionTerm(ContextIndependentOneBodyEnergy):
-  def __init__(self, torsion, reference_torsion, bins=36):
+  def __init__(self, torsion, reference_torsion=None, bins=36):
     ContextIndependentOneBodyEnergy.__init__(self, self.creator())
     self.torsion = torsion
     self.reference = None
@@ -69,7 +140,7 @@ class TorsionTerm(ContextIndependentOneBodyEnergy):
 
 @rosetta.EnergyMethod
 class SmoothTorsionTerm(TorsionTerm):
-  def __init__(self, torsion, reference_torsion, bins=36,
+  def __init__(self, torsion, reference_torsion=None, bins=36,
                concentration=1 / ((np.pi / 18) ** 2)):
     TorsionTerm.__init__(self, torsion, reference_torsion, bins=bins)
     space = np.linspace(-180, 180, bins)
@@ -81,21 +152,53 @@ class SmoothTorsionTerm(TorsionTerm):
     )
     self.k = concentration
 
-  def residue_energy(self, res, pose, emap):
-    pos = res.seqpos()
-    phi = pose.phi(pos)
-    psi = pose.psi(pos)
+  def _residue_logprob(self, pos, phi, psi):
+    if not isinstance(phi, torch.Tensor):
+      phi = torch.tensor(phi)
+    if not isinstance(psi, torch.Tensor):
+      psi = torch.tensor(psi)
     distribution = TorsionDistribution(
       self.mu, self.nu, self.weights[pos],
       k1=self.k, k2=self.k
     )
     return distribution.log_density(phi, psi)
 
+  def residue_energy(self, res, pose, emap):
+    pos = res.seqpos()
+    phi = res.mainchain_torsion(1)
+    psi = res.mainchain_torsion(2)
+    return self._residue_logprob(pos, phi, psi)
+
+  def defines_dof_derivatives(self, pose):
+    return True
+
+  def eval_residue_dof_derivative(self, res, min_data, dof_id, torsion_id, pose, sfxn, weights):
+    if not torsion_id.valid() or torsion_id.type() != rosetta.core.id.TorsionType.BB:
+      return 0.0
+
+    phi = torch.tensor(res.mainchain_torsion(1), requires_grad=True)
+    psi = torch.tensor(res.mainchain_torsion(2), requires_grad=True)
+    prob = self._residue_logprob(phi, psi)
+    gradients = grad([prob], [phi, psi])
+    return float(gradients[torsion_id.torsion() - 1])
+
+  def eval_dof_derivative(self, dof_id, torsion_id, pose, sfxn, weights):
+    res = pose.residue(torsion_id.rsd())
+    if not torsion_id.valid() or torsion_id.type() != rosetta.core.id.TorsionType.BB:
+      return 0.0
+
+    phi = torch.tensor(res.mainchain_torsion(1), requires_grad=True)
+    psi = torch.tensor(res.mainchain_torsion(2), requires_grad=True)
+    prob = self._residue_logprob(phi, psi)
+    gradients = grad([prob], [phi, psi])
+    return float(gradients[torsion_id.torsion() - 1])
+
 @rosetta.EnergyMethod
-class SmoothArgmaxTorsionTerm(TorsionTerm):
-  def __init__(self, torsion, reference_torsion, bins=36,
+class SmoothArgmaxTorsionTerm(SmoothTorsionTerm):
+  def __init__(self, torsion, reference_torsion=None, bins=36,
                concentration=1 / ((np.pi / 18) ** 2)):
-    TorsionTerm.__init__(self, torsion, reference_torsion, bins=bins)
+    SmoothTorsionTerm.__init__(self, torsion, reference_torsion, bins=bins)
+    self.weights = None
     self.k = concentration
     torsion_max = self.torsion.reshape(
       self.torsion.size(0), -1
@@ -103,10 +206,11 @@ class SmoothArgmaxTorsionTerm(TorsionTerm):
     self.mu = torsion_max % bins
     self.nu = torsion_max // bins
 
-  def residue_energy(self, res, pose, emap):
-    pos = res.seqpos()
-    phi = pose.phi(pos)
-    psi = pose.psi(pos)
+  def _residue_logprob(self, pos, phi, psi):
+    if not isinstance(phi, torch.Tensor):
+      phi = torch.tensor(phi)
+    if not isinstance(psi, torch.Tensor):
+      psi = torch.tensor(psi)
     distribution = TorsionDistribution(
       self.mu[pos], self.nu[pos],
       k1=self.k, k2=self.k
@@ -123,6 +227,11 @@ class InterpolatedTorsionTerm(TorsionTerm):
     return angle
 
   def _interpolate(self, pos, phi, psi):
+    if not isinstance(phi, torch.Tensor):
+      phi = torch.tensor(phi)
+    if not isinstance(psi, torch.Tensor):
+      psi = torch.tensor(psi)
+
     phi_bin = self._bin_angle(phi)
     phi_next = (phi_bin + 1) % self.bins
     psi_bin = self._bin_angle(psi)
@@ -132,13 +241,13 @@ class InterpolatedTorsionTerm(TorsionTerm):
     phi_p = (phi - phi_offset) / 360 * self.bins % 1
     psi_p = (psi - psi_offset) / 360 * self.bins % 1
     if self.has_ref:
-      numerators = np.array([
+      numerators = torch.Tensor([
         [self.reference[pos, phi_bin, psi_bin], self.reference[pos, phi_next, psi_bin]],
         [self.reference[pos, phi_bin, psi_next], self.reference[pos, phi_next, psi_next]]
       ])
     else:
-      numerators = np.zeros((2, 2))
-    denominators = np.array([
+      numerators = torch.zeros(2, 2)
+    denominators = torch.Tensor([
       [self.torsion[pos, phi_bin, psi_bin], self.torsion[pos, phi_next, psi_bin]],
       [self.torsion[pos, phi_bin, psi_next], self.torsion[pos, phi_next, psi_next]]
     ])
@@ -151,12 +260,34 @@ class InterpolatedTorsionTerm(TorsionTerm):
 
   def residue_energy(self, res, pose, emap):
     pos = res.seqpos()
-    phi = pose.phi(pos)
-    psi = pose.psi(pos)
-
+    phi = res.mainchain_torsion(1)
+    psi = res.mainchain_torsion(2)
     score = self._interpolate(pos, phi, psi)
-
     emap.get().set(self.scoreType, score)
+  
+  def defines_dof_derivatives(self, pose):
+    return True
+
+  def eval_residue_dof_derivative(self, res, min_data, dof_id, torsion_id, pose, sfxn, weights):
+    if not torsion_id.valid() or torsion_id.type() != rosetta.core.id.TorsionType.BB:
+      return 0.0
+
+    phi = torch.tensor(res.mainchain_torsion(1), requires_grad=True)
+    psi = torch.tensor(res.mainchain_torsion(2), requires_grad=True)
+    prob = self._interpolate(phi, psi)
+    gradients = grad([prob], [phi, psi])
+    return float(gradients[torsion_id.torsion() - 1])
+
+  def eval_dof_derivative(self, dof_id, torsion_id, pose, sfxn, weights):
+    res = pose.residue(torsion_id.rsd())
+    if not torsion_id.valid() or torsion_id.type() != rosetta.core.id.TorsionType.BB:
+      return 0.0
+
+    phi = torch.tensor(res.mainchain_torsion(1), requires_grad=True)
+    psi = torch.tensor(res.mainchain_torsion(2), requires_grad=True)
+    prob = self._interpolate(phi, psi)
+    gradients = grad([prob], [phi, psi])
+    return float(gradients[torsion_id.torsion() - 1])
 
 def get_betafold_scoring_function(distograms, torsions,
                                   distance_args=None,
