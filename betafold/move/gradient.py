@@ -5,7 +5,7 @@ import torch
 from pyrosetta import *
 from rosetta.protocols.minimization_packing import MinMover
 
-class LangevinPipeline():
+class GradientPipeline():
   def __init__(self, initializer, score, max_iter=1000, pymol=None):
     self.initializer = initializer
     self.score = score
