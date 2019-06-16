@@ -66,8 +66,8 @@ class ResidualStack1d(ResidualStackNd):
     )
 
 class ResidualStack2d(ResidualStackNd):
-  def __init__(self, size=128, hidden_size=64, N=1,
+  def __init__(self, size=128, hidden_size=64, N=2,
                depth=55, dilations=[1, 2, 4, 8]):
     super(ResidualStack2d, self).__init__(
-      size=size, hidden_size=hidden_size, N=1, depth=depth, dilations=dilations
+      size=size, hidden_size=hidden_size, N=2, depth=depth, dilations=dilations
     )
