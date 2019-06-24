@@ -39,9 +39,6 @@ class MaskedLoss(nn.Module):
     return (self.loss(value, target) * mask.to(torch.float)).sum() / float(mask.sum())
 
 if __name__ == "__main__":
-  from pyrosetta import init
-  init("-mute all")
-
   path = sys.argv[1]
   valid_path = sys.argv[2]
   training_args = {
