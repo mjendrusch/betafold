@@ -46,12 +46,12 @@ if __name__ == "__main__":
   valid_path = sys.argv[2]
   training_args = {
     "device": "cuda:0",
-    "batch_size": 10,
-    "max_epochs": 50,
-    "network_name": "resnet-40"
+    "batch_size": 32,
+    "max_epochs": 1000,
+    "network_name": "resnet-220"
   }
 
-  net = JointNetwork(84, 65, 10, depth=10)
+  net = nn.DataParallel(JointNetwork(84, 65, 10, depth=55))
 
   data = DistogramData(
     path, size=64
@@ -64,8 +64,7 @@ if __name__ == "__main__":
     net, data, valid_data, [
       MaskedLoss(),
       MaskedLoss(),
-      MaskedLoss(),
-      # nn.CrossEntropyLoss()
+      MaskedLoss()
     ], **training_args,
     valid_callback=lambda x, y, z: x
   )
